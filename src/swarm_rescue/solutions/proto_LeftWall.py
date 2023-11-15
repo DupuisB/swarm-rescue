@@ -55,6 +55,8 @@ class MyDroneLeftWall(DroneAbstract):
         rotation = best_turn_angle * kp
         rotation = clamp(rotation, -1.0, 1.0)
         if 20 <= closest_wall_distance <= 30:
+            diff_from_ideal = 25 - closest_wall_distance
+            rotation = clamp(rotation, -1.0, 1.0)
             forward, lateral = 1, 1
         elif closest_wall_distance < 20:
             diff = abs(20 - closest_wall_distance)
