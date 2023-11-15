@@ -37,11 +37,11 @@ class MyDroneLeftWall(DroneAbstract):
         Rotation is counter-clockwise
         Moves diagonally (more speed)
         """
-        # Get the angle of the closest wall
-        closest_wall_number = None
-        # Get the distance to the closest wall
-        closest_wall_distance = float('inf')
         rotation, lateral, forward = 0, 0, 0
+
+        # Finds closest wall that is approximately to the left
+        closest_wall_number = None
+        closest_wall_distance = float('inf')
         for i in range(len(self.lidar_values())):
             if 25 <= i <= 110:
                 continue
@@ -50,33 +50,31 @@ class MyDroneLeftWall(DroneAbstract):
                 closest_wall_number = i
                 closest_wall_distance = dist
 
-        # Simple P controller
-        kp = 0.01
-        if closest_wall_number < 67:
+        if closest_wall_number < 67: #Normalize angle
             closest_wall_number += 180
         best_turn_angle = closest_wall_number - 157
-        rotation = best_turn_angle * kp
-        if closest_wall_distance < 20:
+        # Simple P controller for rotation
+        rotation = best_turn_angle * 0.007
+        if closest_wall_distance < 20: #Too close
             forward, lateral = 1, 0
             rotation *= 3
-        elif closest_wall_distance < 30:
+        elif closest_wall_distance < 30: #Perfect
             forward, lateral = 1, 1
-        elif closest_wall_distance < 40:
+        elif closest_wall_distance < 40: #Too far
             forward, lateral = 0, 1
             rotation *= 3
-        else:
+        else: #Way too far
             forward, lateral = 0, 1
-            rotation *= 6
+            rotation *= 7
 
         rotation = clamp(rotation, -1.0, 1.0)
-
 
         #Turn faster if wall in front
         if self.lidar_values()[112] < 80:
             rotation = -1.0
             lateral = -0.5
 
-        #Turn faster if wall stops
+        #Turn faster if it sees a gap (wall stops)
         for i in range(135, 160):
             if abs(self.lidar_values()[i] - self.lidar_values()[i+1]) > 20 and abs(closest_wall_number - 157.5) < 5:
                 print("Wall stops")
@@ -86,18 +84,22 @@ class MyDroneLeftWall(DroneAbstract):
         return rotation, lateral, forward
 
     def process_semantic_sensor(self):
+        """
+        If not grabbing, go to closest wounded person
+        If grabbing, go to closest rescue center
+        """
         found_objective = False
         forward, rotation, lateral = 0, 0, 0
         for i in range(len(self.semantic_values())):
             data = self.semantic_values()[i]
-            if not self.isGrabing:
+            if not self.isGrabing: #Go to closest wounded person
                 if 0 < data.distance < 30 and data.entity_type == DroneSemanticSensor.TypeEntity.WOUNDED_PERSON:
-                    self.isGrabing = True
+                    self.isGrabing = True #Grab if close enough
                 elif data.distance < 100 and data.entity_type == DroneSemanticSensor.TypeEntity.WOUNDED_PERSON:
                     found_objective = True
-            else:
+            else: #Go to closest rescue center
                 if 0 < data.distance < 20 and data.entity_type == DroneSemanticSensor.TypeEntity.RESCUE_CENTER:
-                    self.isGrabing = False
+                    self.isGrabing = False #Drop if close enough
                 elif data.distance < 100 and data.entity_type == DroneSemanticSensor.TypeEntity.RESCUE_CENTER:
                     found_objective = True
 
@@ -118,22 +120,20 @@ class MyDroneLeftWall(DroneAbstract):
 
         # Command:
         found_objective, rotation, lateral, forward = self.process_semantic_sensor()
-        if not found_objective:
+        if not found_objective: #If no objective, follow wall
             rotation, lateral, forward = self.process_lidar_sensor()
         if self.isGrabing:
             grasper = 1
 
-        if self.idle > 20: #If stuck for long enough
+        if self.idle > 20: #If stuck for long enough, set idleRotation to True
             self.idleRotation = True
-        if self.idleRotation: #If stuck for long enough, rotate sur place
+        if self.idleRotation: #If idleRotation, rotate
             rotation, lateral, forward = -1, 0, 0
             self.idle -= 1
         elif self.odometer_values()[0] < 1: #If not moving, add to stuck counter
             self.idle += 1
-        if self.idle == 0: #Reset stuck counter/rotation
+        if self.idle == 0: #Rotation done -> reset idleRotation
             self.idleRotation = False
-
-
 
         command = {
             'forward': forward,
