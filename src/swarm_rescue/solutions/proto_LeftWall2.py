@@ -15,7 +15,7 @@ from spg_overlay.entities.rescue_center import RescueCenter, wounded_rescue_cent
 from spg_overlay.entities.wounded_person import WoundedPerson
 from spg_overlay.entities.drone_distance_sensors import DroneSemanticSensor
 
-class MyDroneLeftWall(DroneAbstract):
+class MyDroneLeftWall2(DroneAbstract):
     def __init__(self,
                  identifier: Optional[int] = None,
                  misc_data: Optional[MiscData] = None,
@@ -26,6 +26,8 @@ class MyDroneLeftWall(DroneAbstract):
                          **kwargs)
         self.x, self.y = None, None
         self.etape = 1
+        self.prev_error = 0
+        self.integral = 0
 
     def process_lidar_sensor(self):
         """
@@ -46,50 +48,32 @@ class MyDroneLeftWall(DroneAbstract):
             if dist < closest_wall_distance:
                 closest_wall_number = i
                 closest_wall_distance = dist
-
-        # Simple P controller
-        kp = 0.01
         if closest_wall_number < 67:
             closest_wall_number += 180
-        best_turn_angle = closest_wall_number - 157
-        rotation = best_turn_angle * kp
-        if closest_wall_distance < 20:
-            forward, lateral = 1, 0
-            rotation *= 3
-        elif closest_wall_distance < 30:
-            forward, lateral = 1, 1
-        elif closest_wall_distance < 40:
-            forward, lateral = 0, 1
-            rotation *= 3
-        else:
-            forward, lateral = 0, 1
-            rotation *= 6
 
+        # Simple PI controller to follow the wall
+        Kp = 0.5
+        Ki = 0.1
+        error = 40 - closest_wall_distance
+        self.integral += error
+        control_signal = Kp * error + Ki * (error - self.prev_error)
+        rotation = control_signal
+        print(f'rotation: {rotation}')
         rotation = clamp(rotation, -1.0, 1.0)
-
-
-        #Turn faster if wall in front
-        if self.lidar_values()[112] < 80:
-            rotation = -1.0
-            lateral = -0.5
-
-        #Turn faster if wall stops
-        for i in range(135, 160):
-            if abs(self.lidar_values()[i] - self.lidar_values()[i+1]) > 20 and abs(closest_wall_number - 157.5) < 5:
-                print("Wall stops")
-                rotation = 1.0
-                forward = 0
-
+        forward = 1 - Ki * self.integral
+        forward = clamp(forward, -1.0, 1.0)
+        lateral = forward
         return rotation, lateral, forward
 
     def process_semantic_sensor(self):
-
         pass
 
-    def follow_direction(self, angle, goal_direction):
-        pass
     def control(self):
-        """Makes the drone follow the left wall"""
+        """Makes the drone follow the right wall"""
+        # Get the coordinates of the drone
+        x, y = self.measured_gps_position()
+        angle = self.measured_compass_angle()  # in radians
+
         forward, lateral, rotation, grasper = 0, 0, 0, 0
 
         # Command:
