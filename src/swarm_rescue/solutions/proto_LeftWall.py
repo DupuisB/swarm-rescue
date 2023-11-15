@@ -16,6 +16,10 @@ from spg_overlay.entities.wounded_person import WoundedPerson
 from spg_overlay.entities.drone_distance_sensors import DroneSemanticSensor
 
 class MyDroneLeftWall(DroneAbstract):
+    """
+    Follows the left one, once it finds a wounded person, it goes back (follow right wall) until it finds a rescue center
+    To make it so it finishes on the left wall, set self.oneWayOnly to True
+    """
     def __init__(self,
                  identifier: Optional[int] = None,
                  misc_data: Optional[MiscData] = None,
@@ -24,11 +28,14 @@ class MyDroneLeftWall(DroneAbstract):
                          misc_data=misc_data,
                          display_lidar_graph=False,
                          **kwargs)
+        self.oneWayOnly = True
+
         self.x, self.y = 0, 0
         self.etape = 1
         self.isGrabing = False
         self.idle = 0
         self.idleRotation = False
+        self.inverse = 1
 
     def process_lidar_sensor(self):
         """
@@ -77,9 +84,61 @@ class MyDroneLeftWall(DroneAbstract):
         #Turn faster if it sees a gap (wall stops)
         for i in range(135, 160):
             if abs(self.lidar_values()[i] - self.lidar_values()[i+1]) > 20 and abs(closest_wall_number - 157.5) < 5:
-                print("Wall stops")
                 rotation = 1.0
                 forward = 0
+
+        return rotation, lateral, forward
+
+    def process_lidar_sensor_inverse(self):
+        """
+        Makes sure closest wall is at 90 degrees
+        Makes sur the distance to the wall is between 40 and 60 pixels
+        Rotation is counter-clockwise
+        Moves diagonally (more speed)
+        """
+        rotation, lateral, forward = 0, 0, 0
+
+        # Finds closest wall that is approximately to the left
+        closest_wall_number = None
+        closest_wall_distance = float('inf')
+        for i in range(len(self.lidar_values())):
+            if 70 < i < 155:
+                continue
+            dist = self.lidar_values()[i]
+            if dist < closest_wall_distance:
+                closest_wall_number = i
+                closest_wall_distance = dist
+
+        if closest_wall_number > 122: #Normalize angle
+            closest_wall_number -= 180
+
+        best_turn_angle = closest_wall_number - 22
+        # Simple P controller for rotation
+        rotation = best_turn_angle * 0.007
+        if closest_wall_distance < 20: #Too close
+            forward, lateral = 1, 0
+            rotation *= 3
+        elif closest_wall_distance < 30: #Perfect
+            forward, lateral = 1, -1
+        elif closest_wall_distance < 40: #Too far
+            forward, lateral = 0, -1
+            rotation *= 3
+        else: #Way too far
+            forward, lateral = 0, -1
+            rotation *= 7
+
+        rotation = clamp(rotation, -1.0, 1.0)
+
+        #Turn faster if wall in front
+        if self.lidar_values()[112] < 80:
+            rotation = 1.0
+            forward = -0.5
+
+        #Turn faster if it sees a gap (wall stops)
+        for i in range(20, 45):
+            if abs(self.lidar_values()[i] - self.lidar_values()[i+1]) > 20 and abs(closest_wall_number - 22.5) < 5:
+                rotation = -1.0
+                lateral = 0
 
         return rotation, lateral, forward
 
@@ -95,11 +154,13 @@ class MyDroneLeftWall(DroneAbstract):
             if not self.isGrabing: #Go to closest wounded person
                 if 0 < data.distance < 30 and data.entity_type == DroneSemanticSensor.TypeEntity.WOUNDED_PERSON:
                     self.isGrabing = True #Grab if close enough
+                    self.inverse = -1 #Inverse rotation
                 elif data.distance < 100 and data.entity_type == DroneSemanticSensor.TypeEntity.WOUNDED_PERSON:
                     found_objective = True
             else: #Go to closest rescue center
                 if 0 < data.distance < 20 and data.entity_type == DroneSemanticSensor.TypeEntity.RESCUE_CENTER:
                     self.isGrabing = False #Drop if close enough
+                    self.inverse = 1
                 elif data.distance < 100 and data.entity_type == DroneSemanticSensor.TypeEntity.RESCUE_CENTER:
                     found_objective = True
 
@@ -120,15 +181,18 @@ class MyDroneLeftWall(DroneAbstract):
 
         # Command:
         found_objective, rotation, lateral, forward = self.process_semantic_sensor()
-        if not found_objective: #If no objective, follow wall
+        if not found_objective and (self.inverse == 1 or self.oneWayOnly): #If no objective, follow wall
             rotation, lateral, forward = self.process_lidar_sensor()
+        elif not found_objective:
+            rotation, lateral, forward = self.process_lidar_sensor_inverse()
         if self.isGrabing:
             grasper = 1
 
-        if self.idle > 20: #If stuck for long enough, set idleRotation to True
+        if self.idle > 10: #If stuck for long enough, set idleRotation to True
             self.idleRotation = True
+            print("Stuck !")
         if self.idleRotation: #If idleRotation, rotate
-            rotation, lateral, forward = -1, 0, 0
+            rotation, lateral, forward = -1, 0, 0.2
             self.idle -= 1
         elif self.odometer_values()[0] < 1: #If not moving, add to stuck counter
             self.idle += 1
