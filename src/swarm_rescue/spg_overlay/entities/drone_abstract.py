@@ -243,8 +243,12 @@ class DroneAbstract(Agent):
 
     def odometer_is_disabled(self):
         return self.odometer().is_disabled()
-
     def semantic_values(self):
+        """
+        Returns a list of SensorData objects. (data.distance, data.angle, data.entity_type, data.grasped)
+        Entity types are WoundedPerson, RescueCenter and Drone.
+        If Wall is detected, distance and angle are 0
+        """
         return self.semantic().get_sensor_values()
 
     def lidar_values(self):

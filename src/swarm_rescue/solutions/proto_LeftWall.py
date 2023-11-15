@@ -24,8 +24,11 @@ class MyDroneLeftWall(DroneAbstract):
                          misc_data=misc_data,
                          display_lidar_graph=False,
                          **kwargs)
-        self.x, self.y = None, None
+        self.x, self.y = 0, 0
         self.etape = 1
+        self.isGrabing = False
+        self.idle = 0
+        self.idleRotation = False
 
     def process_lidar_sensor(self):
         """
@@ -83,17 +86,54 @@ class MyDroneLeftWall(DroneAbstract):
         return rotation, lateral, forward
 
     def process_semantic_sensor(self):
+        found_objective = False
+        forward, rotation, lateral = 0, 0, 0
+        for i in range(len(self.semantic_values())):
+            data = self.semantic_values()[i]
+            if not self.isGrabing:
+                if 0 < data.distance < 30 and data.entity_type == DroneSemanticSensor.TypeEntity.WOUNDED_PERSON:
+                    self.isGrabing = True
+                elif data.distance < 100 and data.entity_type == DroneSemanticSensor.TypeEntity.WOUNDED_PERSON:
+                    found_objective = True
+            else:
+                if 0 < data.distance < 20 and data.entity_type == DroneSemanticSensor.TypeEntity.RESCUE_CENTER:
+                    self.isGrabing = False
+                elif data.distance < 100 and data.entity_type == DroneSemanticSensor.TypeEntity.RESCUE_CENTER:
+                    found_objective = True
 
-        pass
+            rotation = clamp(data.angle, -1.0, 1.0)
+            if abs(data.angle) < 0.2:
+                forward = 1
+            if found_objective:
+                break
+
+        return found_objective, rotation, lateral, forward
 
     def follow_direction(self, angle, goal_direction):
         pass
+
     def control(self):
         """Makes the drone follow the left wall"""
         forward, lateral, rotation, grasper = 0, 0, 0, 0
 
         # Command:
-        rotation, lateral, forward = self.process_lidar_sensor()
+        found_objective, rotation, lateral, forward = self.process_semantic_sensor()
+        if not found_objective:
+            rotation, lateral, forward = self.process_lidar_sensor()
+        if self.isGrabing:
+            grasper = 1
+
+        if self.idle > 20: #If stuck for long enough
+            self.idleRotation = True
+        if self.idleRotation: #If stuck for long enough, rotate sur place
+            rotation, lateral, forward = -1, 0, 0
+            self.idle -= 1
+        elif self.odometer_values()[0] < 1: #If not moving, add to stuck counter
+            self.idle += 1
+        if self.idle == 0: #Reset stuck counter/rotation
+            self.idleRotation = False
+
+
 
         command = {
             'forward': forward,
