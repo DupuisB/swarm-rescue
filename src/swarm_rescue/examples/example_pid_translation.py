@@ -12,7 +12,7 @@ import arcade
 import numpy as np
 
 # This line add, to sys.path, the path to parent path of this file
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # noqa
 
 from spg_overlay.utils.path import Path
 from spg_overlay.utils.pose import Pose
@@ -53,7 +53,8 @@ class MyDronePidTranslation(DroneAbstract):
 
         self.iter_path += 1
         if self.iter_path % 3 == 0:
-            position = np.array([self.true_position()[0], self.true_position()[1]])
+            position = np.array(
+                [self.true_position()[0], self.true_position()[1]])
             angle = self.true_angle()
             pose = Pose(position=position, orientation=angle)
             self.path_done.append(pose)
@@ -67,7 +68,8 @@ class MyDronePidTranslation(DroneAbstract):
             self.to_the_right = not self.to_the_right
             print("*******************************")
 
-        diff_position = self.position_consigne - np.asarray(self.true_position())
+        diff_position = self.position_consigne - \
+            np.asarray(self.true_position())
 
         if self.identifier == 0:  # with PD
             deriv_diff_position = diff_position - self.prev_diff_position
@@ -115,7 +117,8 @@ class MyDronePidTranslation(DroneAbstract):
         half_height = self._half_size_array[1]
         pt1 = self.position_consigne + np.array([half_width, 0])
         pt2 = self.position_consigne + np.array([half_width, 2 * half_height])
-        arcade.draw_line(pt2[0], pt2[1], pt1[0], pt1[1], color=arcade.color.GRAY)
+        arcade.draw_line(pt2[0], pt2[1], pt1[0], pt1[1],
+                         color=arcade.color.GRAY)
 
     def draw_path(self, path: Path(), color: Tuple[int, int, int]):
         length = path.length()
