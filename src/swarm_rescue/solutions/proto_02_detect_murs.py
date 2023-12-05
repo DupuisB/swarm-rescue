@@ -131,7 +131,8 @@ class MyTestDrone(DroneAbstract):
 
         # on met l'angle à pi/2 pour les lignes verticales
         @np.vectorize
-        def curstom_arctan(a, b): return np.pi/2 if b == 0 else np.arctan(a/b)
+        def curstom_arctan(a, b): return np.pi / \
+            2 if b == 0 else abs(np.arctan(a/b))
         angles = curstom_arctan(
             lines[:, 0, 3]-lines[:, 0, 1], lines[:, 0, 2]-lines[:, 0, 0])
         # convertion de l'angle maximum en radians
@@ -274,10 +275,18 @@ class MyTestDrone(DroneAbstract):
                 if np.sum(mask) >= 1:
                     # prend la moyenne selon l'axe
                     # prend la plus longue selon l'autre axe
-                    extrems = lines[np.argmax(
-                        abs(lines[mask, 0, (1-axis) + 2]-lines[mask, 0, (1-axis)]))][0]
+                    closes = lines[mask]
+                    longs = np.abs(
+                        closes[:, 0, (1 - axis)] - closes[:, 0, (1-axis) + 2])
+                    # print(longs.shape, mask.shape)
+                    # print(np.argmax(longs, axis=0))
+                    extrems = closes[np.argmax(longs)][0]
+                    # print(extrems)
+                    # extrems = lines[np.argmax(
+                    #    abs(lines[mask, 0, (1-axis) + 2]-lines[mask, 0, (1-axis)]))][0]
                     # fait la moyenne des coordonnées des lignes sélectionnées selon l'axe
-                    med = np.mean(lines[mask, 0, axis])
+                    coord = map(lambda x: x[axis], closes[0])
+                    med = np.mean(list(coord))
                     # print(med)
                     # print(extrems)
                     new = np.zeros((1, 4))
@@ -352,12 +361,8 @@ class MyTestDrone(DroneAbstract):
 
         if lines_h is not None and lines_v is not None:
             fused_lines = np.concatenate((lines_h, lines_v))
-        elif lines_h is not None:
-            fused_lines = lines_h
-        elif lines_v is not None:
-            fused_lines = lines_v
         else:
-            fused_lines = None
+            return command
         img_2 = self.draw_lines(fused_lines)
 
         # rounded_lines = self.int_coordonates(aligned_lines)
