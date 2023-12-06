@@ -54,9 +54,9 @@ class Launcher:
         self.team_info = TeamInfo()
         self.eval_plan = EvalPlan()
 
-        eval_config = EvalConfig(map_type=MyMapIntermediate01, nb_rounds=2)
+        eval_config = EvalConfig(map_type=MyMapIntermediate01, nb_rounds=1)
         self.eval_plan.add(eval_config=eval_config)
-
+        """
         eval_config = EvalConfig(map_type=MyMapIntermediate02)
         self.eval_plan.add(eval_config=eval_config)
 
@@ -70,7 +70,7 @@ class Launcher:
 
         zones_config: ZonesConfig = (ZoneType.NO_COM_ZONE, ZoneType.NO_GPS_ZONE, ZoneType.KILL_ZONE)
         eval_config = EvalConfig(map_type=MyMapMedium02, zones_config=zones_config, nb_rounds=1, config_weight=1)
-        self.eval_plan.add(eval_config=eval_config)
+        self.eval_plan.add(eval_config=eval_config)"""
 
         self.number_drones = None
         self.time_step_limit = None
