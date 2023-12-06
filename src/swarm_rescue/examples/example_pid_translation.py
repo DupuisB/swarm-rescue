@@ -117,6 +117,8 @@ class MyDronePidTranslation(DroneAbstract):
         pt2 = self.position_consigne + np.array([half_width, 2 * half_height])
         arcade.draw_line(pt2[0], pt2[1], pt1[0], pt1[1], color=arcade.color.GRAY)
 
+
+
     def draw_path(self, path: Path(), color: Tuple[int, int, int]):
         length = path.length()
         # print(length)

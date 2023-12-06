@@ -2,8 +2,10 @@ import os
 import sys
 import cv2 as cv
 from typing import List, Type
+import arcade
 
 from spg.utils.definitions import CollisionTypes
+from spg.playground import Playground
 
 # This line add, to sys.path, the path to parent path of this file
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # noqa
@@ -20,6 +22,7 @@ from spg_overlay.utils.path import Path
 from spg_overlay.utils.pose import Pose
 from spg_overlay.utils.utils import clamp
 
+from maps.walls_medium_02 import add_walls, add_boxes
 
 import numpy as np
 import time
@@ -37,16 +40,14 @@ class MyTestDrone(DroneAbstract):
         self.position_consigne = [0.0, 100.0]
         self.iter = 0
         self.prev_diff_position = 0
-        self.window_debug = cv.namedWindow('steps')
-        self.window_constants = cv.namedWindow('constants')
 
         self.constants = {"threshold": 100, "minLineLength": 10,
                           "maxLineGap": 10, "max_degre": 30, "max_delta": 30, "points_size": 5,
                           "second_threshold": 100, "second_minLineLength": 10, "second_maxLineGap": 10}
 
-        for c in self.constants:
-            cv.createTrackbar(
-                c, 'constants', self.constants[c], 10*self.constants[c], nothing)
+        # Drawing stuff
+        self.lines = []
+        self.corners = []
 
     def define_message_for_all(self):
         """
@@ -70,11 +71,11 @@ class MyTestDrone(DroneAbstract):
         lidar_points = np.zeros((nb_points, 2))
         # we fill the matrix
         lidar_points[:, 0] = lidar_vals[mask] * \
-            np.cos(self.lidar_rays_angles()[mask] +
-                   self.measured_compass_angle())
+                             np.cos(self.lidar_rays_angles()[mask] +
+                                    self.measured_compass_angle())
         lidar_points[:, 1] = lidar_vals[mask] * \
-            np.sin(self.lidar_rays_angles()[mask] +
-                   self.measured_compass_angle())
+                             np.sin(self.lidar_rays_angles()[mask] +
+                                    self.measured_compass_angle())
         # we add the position of the drone
         lidar_points[:, 0] += self.measured_gps_position()[0]
 
@@ -83,14 +84,16 @@ class MyTestDrone(DroneAbstract):
         return lidar_points
 
     def convert_absolute_points_to_image_points(self, points):
-        """Pourqoi le plus 25 ?"""
-        # la première colonne recoit +self.size_area[0]/2+25
-        # la deuxième colonne recoit +self.size_area[1]/2+25
-        points[:, 0] += self.size_area[0]/2+25
+        points[:, 0] += self.size_area[0] / 2
         points[:, 1] *= -1
         # sur une image le 0,0 est en haut à gauche
-        points[:, 1] += self.size_area[1] / 2+25
+        points[:, 1] += self.size_area[1] / 2
         return points
+
+    def convert_relative_to_absolute(self, x, y):
+        x += self.size_area[0]/2
+        y += self.size_area[1]/2
+        return x, y
 
     def plot_points(self, points):
         """
@@ -98,7 +101,7 @@ class MyTestDrone(DroneAbstract):
         """
         # we create a black image
         img = np.zeros(
-            (self.size_area[0]+50, self.size_area[1]+50, 1), np.uint8)
+            (self.size_area[0] + 50, self.size_area[1] + 50, 1), np.uint8)
         # we add white circles at the coordinates of the points
         for i in range(points.shape[0]):
             cv.circle(img, (int(points[i, 0]), int(
@@ -108,14 +111,15 @@ class MyTestDrone(DroneAbstract):
     def detect_lines_from_points(self, points):
         points_img = self.plot_points(points)
         # we detect the lines
-        lines = cv.HoughLinesP(points_img, 1, np.pi/180, self.constants["threshold"],
+        lines = cv.HoughLinesP(points_img, 1, np.pi / 180, self.constants["threshold"],
                                minLineLength=self.constants["minLineLength"], maxLineGap=self.constants["maxLineGap"])
         return lines
 
     def detect_lines_from_img(self, img):
         # we detect the lines
-        lines = cv.HoughLinesP(img, 1, np.pi/180, self.constants["second_threshold"],
-                               minLineLength=self.constants["second_minLineLength"], maxLineGap=self.constants["second_maxLineGap"])
+        lines = cv.HoughLinesP(img, 1, np.pi / 180, self.constants["second_threshold"],
+                               minLineLength=self.constants["second_minLineLength"],
+                               maxLineGap=self.constants["second_maxLineGap"])
         return lines
 
     def align_lines_on_axis(self, lines):
@@ -133,23 +137,24 @@ class MyTestDrone(DroneAbstract):
         # on met l'angle à pi/2 pour les lignes verticales
         @np.vectorize
         def curstom_arctan(a, b): return np.pi / \
-            2 if b == 0 else abs(np.arctan(a/b))
+                                         2 if b == 0 else abs(np.arctan(a / b))
+
         angles = curstom_arctan(
-            lines[:, 0, 3]-lines[:, 0, 1], lines[:, 0, 2]-lines[:, 0, 0])
+            lines[:, 0, 3] - lines[:, 0, 1], lines[:, 0, 2] - lines[:, 0, 0])
         # convertion de l'angle maximum en radians
-        eps = np.pi/180*self.constants["max_degre"]
+        eps = np.pi / 180 * self.constants["max_degre"]
         # une ligne est horizontale si angle < eps
         mask_horizontal = angles < eps
         # une ligne est verticale si angle > pi/2 - eps
-        mask_vertical = angles > np.pi/2 - eps
+        mask_vertical = angles > np.pi / 2 - eps
 
         lignes_horizontales = lines[mask_horizontal]
         lignes_verticales = lines[mask_vertical]
         # pour chaque ligne horizontale on calcule son y moyen
         y_moyens = np.array(
-            [lignes_horizontales[:, 0, 1] + lignes_horizontales[:, 0, 3]])/2
+            [lignes_horizontales[:, 0, 1] + lignes_horizontales[:, 0, 3]]) / 2
         x_moyens = np.array(
-            [lignes_verticales[:, 0, 0] + lignes_verticales[:, 0, 2]])/2
+            [lignes_verticales[:, 0, 0] + lignes_verticales[:, 0, 2]]) / 2
         # pour les lignes horizontales on garde comme coordonnées x celles déjà existantes et on prend comme coordonnées y le y moyen
         lignes_horizontales[:, 0, 1] = y_moyens
         lignes_horizontales[:, 0, 3] = y_moyens
@@ -180,15 +185,17 @@ class MyTestDrone(DroneAbstract):
         # print(lidar_angles)
         lidar_x = []
         lidar_y = []
-        for i in range(len(lidar_distance)-1):
+        for i in range(len(lidar_distance) - 1):
             lidar_x.append(
-                lidar_distance[i] * np.cos(lidar_angles[i]+self.measured_compass_angle()) + self.measured_gps_position()[0] + taille_carte[0]/2+25)
+                lidar_distance[i] * np.cos(lidar_angles[i] + self.measured_compass_angle()) +
+                self.measured_gps_position()[0] + taille_carte[0] / 2 + 25)
             lidar_y.append(
-                lidar_distance[i] * np.sin(lidar_angles[i]+self.measured_compass_angle()) + self.measured_gps_position()[1] + taille_carte[1]/2+25)
+                lidar_distance[i] * np.sin(lidar_angles[i] + self.measured_compass_angle()) +
+                self.measured_gps_position()[1] + taille_carte[1] / 2 + 25)
         # on a maintenant les coordonnées cartésiennes des points détectés par le lidar
         # on transforme ça en image binaire
 
-        img = np.zeros((taille_carte[0]+50, taille_carte[1]+50, 1), np.uint8)
+        img = np.zeros((taille_carte[0] + 50, taille_carte[1] + 50, 1), np.uint8)
         # on ajoute des cercles blancs aux coordonnées des points détectés par le lidar
         for i in range(len(lidar_x)):
             # on met un pixel blanc
@@ -205,12 +212,12 @@ class MyTestDrone(DroneAbstract):
         # on utilise la transformée de Hough
         # edges = cv.Canny(img, 50, 200, apertureSize=3)
         # cv.imwrite('edges.png', edges)
-        lines = cv.HoughLinesP(img, 1, np.pi/180, 100,
+        lines = cv.HoughLinesP(img, 1, np.pi / 180, 100,
                                minLineLength=10, maxLineGap=10)
         # print(lines)
         assert (lines is not None)
         # on trace ces lignes dans une noubelle image
-        img2 = np.zeros((taille_carte[0]+50, taille_carte[1]+50, 1), np.uint8)
+        img2 = np.zeros((taille_carte[0] + 50, taille_carte[1] + 50, 1), np.uint8)
         for line in lines:
             x1, y1, x2, y2 = line[0]
             cv.line(img2, (x1, y1), (x2, y2), (255, 255, 255), 2)
@@ -238,10 +245,10 @@ class MyTestDrone(DroneAbstract):
                     mask = np.logical_and(
                         np.logical_not(already_fused),
                         np.logical_and(
-                            np.abs(lines[:, 0, 0]**2 + lines[:, 0, 1]**2 -
-                                   lines[i, 0, 0]**2 - lines[i, 0, 1]**2) < max_distance_squared,
-                            np.abs(lines[:, 0, 2]**2 + lines[:, 0, 3]**2 -
-                                   lines[i, 0, 2]**2 - lines[i, 0, 3]**2) < max_distance_squared
+                            np.abs(lines[:, 0, 0] ** 2 + lines[:, 0, 1] ** 2 -
+                                   lines[i, 0, 0] ** 2 - lines[i, 0, 1] ** 2) < max_distance_squared,
+                            np.abs(lines[:, 0, 2] ** 2 + lines[:, 0, 3] ** 2 -
+                                   lines[i, 0, 2] ** 2 - lines[i, 0, 3] ** 2) < max_distance_squared
                         )
                     )
                     already_fused[mask] = True
@@ -278,7 +285,7 @@ class MyTestDrone(DroneAbstract):
                     # prend la plus longue selon l'autre axe
                     closes = lines[mask]
                     longs = np.abs(
-                        closes[:, 0, (1 - axis)] - closes[:, 0, (1-axis) + 2])
+                        closes[:, 0, (1 - axis)] - closes[:, 0, (1 - axis) + 2])
                     # print(longs.shape, mask.shape)
                     # print(np.argmax(longs, axis=0))
                     extrems = closes[np.argmax(longs)][0]
@@ -322,19 +329,51 @@ class MyTestDrone(DroneAbstract):
         lines[:, 0, 3] = np.round(lines[:, 0, 3])
         return lines
 
+    def ten_pixels(self, pos, x1, y1):
+        if pos[0] <= x1:
+            x1 -= 10
+        else:
+            x1 += 10
+        if pos[1] <= y1:
+            y1 -= 10
+        else:
+            y1 += 10
+        return x1, y1
+
+    def detect_corners(self, lines, pos):
+        pos = self.convert_relative_to_absolute(pos[0], pos[1])
+        for i in range(len(lines)):
+            for j in range(i + 1, len(lines)):
+                found_corner = False
+                x1, y1, x2, y2 = lines[i][0]
+                x3, y3, x4, y4 = lines[j][0]
+                if abs(x1 - x3) < 5 and abs(y2 - y4) < 5:
+                    # Add the corner 10 pixels away from both lines
+                    x, y = (x1 + x3) / 2, (y2 + y4) / 2
+                    found_corner = True
+                elif abs(x2 - x4) < 5 and abs(y1 - y3) < 5:
+                    x, y = (x2 + x4) / 2, (y1 + y3) / 2
+                    found_corner = True
+                elif abs(x1 - x4) < 5 and abs(y2 - y3) < 5:
+                    x, y = (x1 + x4) / 2, (y2 + y3) / 2
+                    found_corner = True
+                elif abs(x2 - x3) < 5 and abs(y1 - y4) < 5:
+                    x, y = (x2 + x3) / 2, (y1 + y4) / 2
+                    found_corner = True
+                if found_corner:
+                    x, y = self.ten_pixels(pos, x, y)
+                    self.corners.append((x, y))
+                    print("corner found at", x, y)
+
     def draw_lines(self, lines):
         img = np.zeros(
-            (self.size_area[0]+50, self.size_area[1]+50, 1), np.uint8)
+            (self.size_area[0] + 50, self.size_area[1] + 50, 1), np.uint8)
         if lines is None:
             return img
         for line in lines:
             x1, y1, x2, y2 = line[0]
             cv.line(img, (int(x1), int(y1)), (int(x2),
                                               int(y2)), (255, 255, 255), 2)
-        # on affiche la position du drone
-        x = self.true_position()[0] + self.size_area[0]/2+25
-        y = -self.true_position()[1] + self.size_area[1]/2+25
-        cv.circle(img, (int(x), int(y)), 5, (255, 255, 255), -1)
         return img
 
     def control(self):
@@ -353,7 +392,6 @@ class MyTestDrone(DroneAbstract):
 
         # seconde passe, permet de transformer les petits bouts de lignes en grands
         second_lines = self.detect_lines_from_img(img_0)
-        img_1 = self.draw_lines(second_lines)
 
         lines_h, lines_v = self.align_lines_on_axis(second_lines)
 
@@ -364,40 +402,57 @@ class MyTestDrone(DroneAbstract):
             fused_lines = np.concatenate((lines_h, lines_v))
         else:
             return command
-        img_2 = self.draw_lines(fused_lines)
 
         # rounded_lines = self.int_coordonates(aligned_lines)
         rounded_lines = self.int_coordonates(fused_lines)
-        img_3 = self.draw_lines(rounded_lines)
-
-        img_affichee = cv.hconcat([img_points, img_0, img_1, img_3])
-        cv.imshow("steps", img_affichee)
-        cv.waitKey(1)
-
-        # on update les constantes
-        for c in self.constants:
-            self.constants[c] = cv.getTrackbarPos(c, 'constants')
+        self.lines = rounded_lines
+        self.detect_corners(rounded_lines, self.measured_gps_position())
 
         self.iter += 1
 
         return command
 
+    def draw_bottom_layer(self):
+        # Draw the lines on the arcade playground
+        for line in self.lines:
+            x1, y1, x2, y2 = line[0]
+            y1, y2 = self.size_area[1] - y1, self.size_area[1] - y2
+            arcade.draw_line(x1, y1, x2, y2, color=arcade.color.RED, line_width=2)
+        for corner in self.corners:
+            x, y = corner
+            y = self.size_area[1] - y
+            arcade.draw_circle_filled(x, y, 15, arcade.color.BLUE)
 
-class MyMapKeyboard(MapAbstract):
+
+class MyMapMapping(MapAbstract):
 
     def __init__(self):
         super().__init__()
 
         # PARAMETERS MAP
-        self._size_area = (400, 400)
+        self._size_area = (1113, 750)
+
+        self._rescue_center = RescueCenter(size=(210, 90))
+        self._rescue_center_pos = ((440, 315), 0)
 
         self._number_drones = 1
-        self._drones_pos = [((0, 0), 0)]
+        self._drones_pos = [((-50, 0), 0)]
         self._drones = []
 
-    def construct_playground(self, drone_type: Type[DroneAbstract]):
+    def construct_playground(self, drone_type: Type[DroneAbstract]) -> Playground:
         playground = ClosedPlayground(size=self._size_area)
 
+        # RESCUE CENTER
+        playground.add_interaction(CollisionTypes.GEM,
+                                   CollisionTypes.ACTIVABLE_BY_GEM,
+                                   wounded_rescue_center_collision)
+
+        playground.add(self._rescue_center, self._rescue_center_pos)
+
+        add_walls(playground)
+        add_boxes(playground)
+
+        # POSITIONS OF THE DRONES
         misc_data = MiscData(size_area=self._size_area,
                              number_drones=self._number_drones)
         for i in range(self._number_drones):
@@ -409,16 +464,11 @@ class MyMapKeyboard(MapAbstract):
 
 
 def main():
-    my_map = MyMapKeyboard()
-
+    my_map = MyMapMapping()
     playground = my_map.construct_playground(drone_type=MyTestDrone)
 
-    # draw_lidar_rays : enable the visualization of the lidar rays
-    # draw_semantic_rays : enable the visualization of the semantic rays
     gui = GuiSR(playground=playground,
                 the_map=my_map,
-                draw_lidar_rays=True,
-                draw_semantic_rays=True,
                 use_keyboard=True,
                 )
     gui.run()
