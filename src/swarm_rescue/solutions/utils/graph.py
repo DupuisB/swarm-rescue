@@ -5,6 +5,7 @@ Graph implementation, here are the characteristics of the graph:
 
 import cv2
 import arcade
+from spg_overlay.entities.drone_abstract import DroneAbstract
 
 class Node:
     def __init__(self, x, y, neighbors=None, primary=False, N=0, E=0, S=0, W=0):
@@ -15,7 +16,7 @@ class Node:
         self.neighbors = neighbors
         self.isPrimary = primary # Corners and gaps are primary
         self.weight = 1 #Number of times the node has been seen
-        self.directions = {"N": N, "E": E, "S": S, "W": W} # -1 wall, 0 unknown, 1 open
+        self.directions = {"N": N, "E": E, "S": S, "W": W} # -1 wall, 0 unknown, 1 open and unexplored, 2 open and explored
         self.timer = 50 #Number of frames before a node is considered old (and removed)
 
     def __eq__(self, other, threshold=20):

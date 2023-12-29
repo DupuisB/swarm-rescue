@@ -3,6 +3,7 @@ import sys
 import cv2 as cv
 from typing import List, Type
 import arcade
+import math
 
 from spg.utils.definitions import CollisionTypes
 from spg.playground import Playground
@@ -10,7 +11,6 @@ from spg.playground import Playground
 # This line add, to sys.path, the path to parent path of this file
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # noqa
 
-from spg_overlay.entities.drone_abstract import DroneAbstract
 from spg_overlay.entities.drone_abstract import DroneAbstract
 from spg_overlay.entities.rescue_center import RescueCenter, wounded_rescue_center_collision
 from spg_overlay.entities.wounded_person import WoundedPerson
@@ -20,7 +20,7 @@ from spg_overlay.gui_map.map_abstract import MapAbstract
 from spg_overlay.utils.misc_data import MiscData
 from spg_overlay.utils.path import Path
 from spg_overlay.utils.pose import Pose
-from spg_overlay.utils.utils import clamp
+from spg_overlay.utils.utils import clamp, normalize_angle
 
 from maps.walls_medium_02 import add_walls, add_boxes
 from solutions.utils.graph import Node, Graph
@@ -50,6 +50,12 @@ class MyTestDrone(DroneAbstract):
         self.lines = []
         self.corners = []
         self.graph = Graph()
+        self.target_position = None
+        self.prev_diff_position = np.zeros(2)
+        self.prev_diff_angle = 0
+
+        self.queue = []
+
 
     def define_message_for_all(self):
         """
@@ -340,9 +346,7 @@ class MyTestDrone(DroneAbstract):
                     if found_corner:
                         x, y = self.ten_pixels(pos, x, y)
                         new_node = Node(x, y, primary=True)
-                        print("New corner: ", x, y)
                         coords_monde = self.absolute_to_world(x, y)
-                        print("Monde: ", coords_monde)
                         #TODO: update N E S W
                         if self.measured_gps_position()[0] < x:
                             new_node.directions["E"] = 1
@@ -353,6 +357,8 @@ class MyTestDrone(DroneAbstract):
                         else:
                             new_node.directions["S"] = 1
                         self.corners.append((x, y))
+                        if self.iter % 10 == 0:
+                            print("corner", coords_monde)
                         self.graph.add_node(new_node)
 
     def draw_lines(self, lines):
@@ -366,10 +372,7 @@ class MyTestDrone(DroneAbstract):
                                               int(y2)), (255, 255, 255), 2)
         return img
 
-    def control(self):
-        command = {"forward": 0.0,
-                   "lateral": 0.0, }
-
+    def update_map(self):
         absolute_points = self.lidar_to_absolute()
         points = self.world_to_absolute2(absolute_points)
 
@@ -382,7 +385,7 @@ class MyTestDrone(DroneAbstract):
             if lines_h is not None and lines_v is not None:
                 fused_lines = np.concatenate((lines_h, lines_v))
             else:
-                return command
+                return
         else:
             fused_lines = base_lines
 
@@ -390,21 +393,103 @@ class MyTestDrone(DroneAbstract):
         self.lines = rounded_lines
         self.detect_corners(rounded_lines, self.measured_gps_position())
 
-        self.iter += 1
         self.graph.update()
-        return command
+        return
+
+    def control_goto(self):
+        """
+        target_position is self.target_position
+        Move the drone to a target position using PID, done when the drone is close enough (20 pixels)
+        """
+        diff_position = self.target_position - np.asarray(self.measured_gps_position())
+        #self.measured_velocity() gives the velocity in both x and y directions
+        if np.linalg.norm(diff_position) < 20 and np.linalg.norm(self.measured_velocity()) < 1:
+            self.target_position = None
+            self.prev_diff_angle = 0
+            self.prev_diff_position = np.zeros(2)
+            print("Arrived at target position")
+            return {"forward": 0, "rotation": 0}
+
+        desired_angle = math.atan2(diff_position[1], diff_position[0])
+
+        diff_angle = normalize_angle(desired_angle - self.measured_compass_angle())
+        deriv_diff_angle = normalize_angle(diff_angle - self.prev_diff_angle)
+
+        # PID controller for rotation
+        Ku_angle = 11.16
+        Tu_angle = 2.0
+        Kp_angle = 0.8 * Ku_angle
+        Kd_angle = Ku_angle * Tu_angle / 40.0
+        rotation = Kp_angle * diff_angle + Kd_angle * deriv_diff_angle
+        rotation = clamp(rotation, -1.0, 1.0)
+
+        deriv_diff_position = diff_position - self.prev_diff_position
+
+        # PID controller for forward movement
+        Ku_position = 25 / 100
+        Tu_position = 26
+        Kp_position = 0.8 * Ku_position
+        Kd_position = Ku_position * Tu_position / 10.0
+        forward = Kp_position * abs(diff_position[0]) + Kd_position * deriv_diff_position[0]
+        forward = clamp(forward, -1.0, 1.0)
+
+        print(f"forward = {Kp_position * diff_position[0]} + {Kd_position * deriv_diff_position[0]}")
+
+        self.prev_diff_position = diff_position
+        self.prev_diff_angle = diff_angle
+        return {"forward": forward, "rotation": rotation}
+
+    def control_orientation(self, angle):
+        """
+        Rotate on itself to reach the given angle (in radians) (using PID)
+        """
+        diff_angle = normalize_angle(angle - self.measured_compass_angle())
+        deriv_diff_angle = normalize_angle(diff_angle - self.prev_diff_angle)
+
+        # PID controller for rotation
+        Ku_angle = 11.16
+        Tu_angle = 2.0
+        Kp_angle = 0.8 * Ku_angle
+        Kd_angle = Ku_angle * Tu_angle / 40.0
+        rotation = Kp_angle * diff_angle + Kd_angle * deriv_diff_angle
+        rotation = clamp(rotation, -1.0, 1.0)
+
+        self.prev_diff_angle = diff_angle
+        return {"forward": 0, "rotation": rotation}
+
+    def control(self):
+        self.update_map()
+        self.iter += 1
+
+        if self.target_position is not None:
+            command = self.control_goto()
+            return command
+        elif len(self.queue) > 0:
+            self.target_position = self.queue.pop(0)
+            command = self.control_goto()
+            return command
+        else:
+            print('done.')
+            #Exit the program
+            time.sleep(2)
+            exit()
+
+        return {"forward": 0, "rotation": 0}
 
     def draw_bottom_layer(self):
         # Draw the lines on the arcade playground
         self.graph.draw_arcade()
-        if self.lines is None:
-            return
-        for line in self.lines:
-            x1, y1, x2, y2 = line[0]
-            arcade.draw_line(x1, y1, x2, y2, color=arcade.color.RED, line_width=2)
-        #for corner in self.corners:
-            #x, y = corner
-            #arcade.draw_circle_filled(x, y, 15, arcade.color.BLUE)
+        if self.lines is not None:
+            for line in self.lines:
+                x1, y1, x2, y2 = line[0]
+                arcade.draw_line(x1, y1, x2, y2, color=arcade.color.RED, line_width=2)
+        # Draw a line to the target position
+        if self.target_position is not None:
+            x1, y1 = self.world_to_absolute(self.measured_gps_position()[0], self.measured_gps_position()[1])
+            x2, y2 = self.world_to_absolute(self.target_position[0], self.target_position[1])
+            arcade.draw_line(x1, y1, x2, y2,
+                             arcade.color.RED, 2)
+            arcade.draw_circle_filled(x2, y2, 5, arcade.color.RED)
 
 
 class MyMapMapping(MapAbstract):
@@ -452,7 +537,8 @@ def main():
 
     gui = GuiSR(playground=playground,
                 the_map=my_map,
-                use_keyboard=True,
+                use_keyboard=False,
+                draw_gps=True
                 )
     gui.run()
 
