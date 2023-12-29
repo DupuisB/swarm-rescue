@@ -7,6 +7,7 @@ import math
 import os
 import sys
 from typing import List, Type, Tuple
+import matplotlib.pyplot as plt
 
 import arcade
 import numpy as np
@@ -27,9 +28,24 @@ from spg_overlay.utils.misc_data import MiscData
 class MyDroneStraight(DroneAbstract):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.target_position = np.array([150, 100])
-        self.prev_diff_position = np.zeros(2)
+        self.target_position = np.array([-60, 60])
+        self.prev_distance = 0
         self.prev_diff_angle = 0
+        self.pid = "P"
+        self.costHistory = np.zeros(1000)
+        self.iter = 0
+
+        self.counter_change_position = 100
+
+        self.iter_path = 0
+        self.path_done = Path()
+        self.prev_diff_position = 0
+
+    def cost(self, position):
+        """
+        Cost function for the PID controller
+        """
+        return np.linalg.norm(self.target_position - position)
 
     def world_to_absolute(self, position):
         return np.array([position[0] + self.size_area[0] / 2, position[1] + self.size_area[1] / 2])
@@ -46,17 +62,20 @@ class MyDroneStraight(DroneAbstract):
         Move the drone to a target position using PID, done when the drone is close enough (20 pixels)
         """
         diff_position = self.target_position - np.asarray(self.measured_gps_position())
+        distance = np.linalg.norm(diff_position)
+
         #self.measured_velocity() gives the velocity in both x and y directions
-        if np.linalg.norm(diff_position) < 20 and np.linalg.norm(self.measured_velocity()) < 1:
+        if distance < 20 and np.linalg.norm(self.measured_velocity()) < 1:
             print("Arrived at target position")
             return {"forward": 0, "rotation": 0}
 
         desired_angle = math.atan2(diff_position[1], diff_position[0])
 
         diff_angle = normalize_angle(desired_angle - self.measured_compass_angle())
+
         deriv_diff_angle = normalize_angle(diff_angle - self.prev_diff_angle)
 
-        # PID controller for rotation
+        # PD controller for rotation
         Ku_angle = 11.16
         Tu_angle = 2.0
         Kp_angle = 0.8 * Ku_angle
@@ -64,23 +83,27 @@ class MyDroneStraight(DroneAbstract):
         rotation = Kp_angle * diff_angle + Kd_angle * deriv_diff_angle
         rotation = clamp(rotation, -1.0, 1.0)
 
-        deriv_diff_position = diff_position - self.prev_diff_position
 
-        # PID controller for forward movement
+        deriv_distance = distance - self.prev_distance
+
+        # PD controller for forward movement
         Ku_position = 25 / 100
         Tu_position = 26
         Kp_position = 0.8 * Ku_position
         Kd_position = Ku_position * Tu_position / 10.0
-        print(f"forward = {Kp_position * diff_position[0]} + {Kd_position * deriv_diff_position[0]}")
-        forward = Kp_position * diff_position[0] + Kd_position * deriv_diff_position[0]
+        forward = Kp_position * distance + Kd_position * deriv_distance
         forward = clamp(forward, -1.0, 1.0)
 
-        self.prev_diff_position = diff_position
         self.prev_diff_angle = diff_angle
+
+        #adjust the cost to find forced oscillations in the P controller
+        self.costHistory[self.iter] = self.cost(self.measured_gps_position())
+
         return {"forward": forward, "rotation": rotation}
 
     def control(self):
         command = self.control_goto()
+        self.iter += 1
         return command
 
 
