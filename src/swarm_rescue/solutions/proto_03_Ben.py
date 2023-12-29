@@ -4,7 +4,9 @@ import cv2 as cv
 from typing import List, Type
 import arcade
 import math
+import random
 
+from typing import Union
 from spg.utils.definitions import CollisionTypes
 from spg.playground import Playground
 
@@ -39,9 +41,11 @@ START = np.array([-80, -80])
 
 class State(Enum):
     EXPLORATION = 0
-    RESCUE = 1
-    RETURN = 2
-    START = 3
+    EXPLORING_NODE = 1
+    RESCUE = 2
+    RETURN = 3
+    START = 4
+    WAITING = 5
 
 
 class ExplorationState(Enum):
@@ -72,7 +76,6 @@ class MyTestDrone(DroneAbstract):
         # Drawing stuff
         self.lines = []
         self.corners = []
-        self.graph = Graph()
         self.target_position = START
         self.prev_diff_distance = 0
         self.prev_diff_angle = 0
@@ -86,6 +89,8 @@ class MyTestDrone(DroneAbstract):
         self.origine = None
         self.target_position = np.array([-80, -80])
         self.old_target_positions = []
+
+        self.node_objective: Node = None
 
         # Better Movement
         self.rotationLock = False
@@ -102,6 +107,11 @@ class MyTestDrone(DroneAbstract):
         # Nombre de transitions empruntées
         self.trans = 0
 
+        #Graph stuff
+        self.graph = Graph()
+        self.lastNode:Node = None #Either primary or secondary
+        self.lastSecondaryNode:Node = None
+
     def define_message_for_all(self):
         """
         Here, we don't need communication...
@@ -116,13 +126,18 @@ class MyTestDrone(DroneAbstract):
         points[:, 1] += self.size_area[1] / 2
         return points
 
-    def world_to_absolute(self, x, y):
+    def world_to_absolute(self, x:Union[int, float, tuple, np.array], y = None):
         """
         Convertit les coordonnées monde en coordonnées absolues
         """
-        x += self.size_area[0] / 2
-        y += self.size_area[1] / 2
-        return x, y
+        if y:
+            x += self.size_area[0] / 2
+            y += self.size_area[1] / 2
+            return x, y
+        else:
+            x[0] += self.size_area[0] / 2
+            x[1] += self.size_area[1] / 2
+            return x
 
     def absolute_to_world(self, x, y):
         """
@@ -405,7 +420,10 @@ class MyTestDrone(DroneAbstract):
                             else:
                                 new_node.directions["S"] = 1
                             self.corners.append((x, y))
-                            self.graph.add_node(new_node)
+                            self.graph.add_node(new_node, self.world_to_absolute(self.measured_gps_position()), self.lastSecondaryNode)
+                            if self.lastSecondaryNode is not None:
+                                self.lastSecondaryNode.neighbors.append(new_node)
+                                new_node.neighbors.append(self.lastSecondaryNode)
 
         absolute_points = lidar_to_absolute()
         points = self.world_to_absolute2(absolute_points)
@@ -425,6 +443,15 @@ class MyTestDrone(DroneAbstract):
         rounded_lines = int_coordonates(fused_lines)
         self.lines = rounded_lines
         detect_corners(rounded_lines, self.measured_gps_position())
+
+        #Every 15 frames, we add the current position as a secondary node
+        if self.iter % 15 == 0:
+            new_node = Node(self.world_to_absolute(self.measured_gps_position()), primary=False)
+            self.graph.add_node(new_node)
+            if self.lastSecondaryNode is not None:
+                self.lastSecondaryNode.neighbors.append(new_node)
+                new_node.neighbors.append(self.lastSecondaryNode)
+            self.lastSecondaryNode = new_node
 
         self.graph.update()
         return
@@ -446,7 +473,6 @@ class MyTestDrone(DroneAbstract):
             self.target_position = None
             self.prev_diff_angle = 0
             self.prev_diff_distance = 0
-            print("Arrived at target position")
             return {"forward": 0, "rotation": 0}
 
         desired_angle = math.atan2(diff_position[1], diff_position[0])
@@ -542,44 +568,86 @@ class MyTestDrone(DroneAbstract):
 
         if self.lidar_values()[90] < 100:
             print('Wall in front !')
+            #Add the node to the graph
+            new_node = Node(self.world_to_absolute(self.measured_gps_position()), primary=False)
+            self.graph.add_node(new_node)
+            new_node.neighbors.append(self.node)
             self.movementState = Movement.STOPPED
             return EMPTY
 
         return self.control_goto()
 
+    def control_gotoNode(self):
+        """
+        Go to the given node
+        """
+        self.target_position = self.absolute_to_world(self.node_objective.x, self.node_objective.y)
+        command = self.control_goto()
+        if self.movementState == Movement.STOPPED:
+            self.node_objective.neighbors.append(self.lastSecondaryNode)
+            self.lastSecondaryNode.neighbors.append(self.node_objective)
+        self.lastNode = self.node_objective
+        if not self.node_objective.isPrimary:
+            self.lastSecondaryNode = self.node_objective
+        return command
+
+    def control_explore_node(self):
+        """
+        Explore the given node
+        """
+        if self.movementState == Movement.STOPPED:
+            self.trans += 1
+        if self.trans == 1:
+            self.state = State.EXPLORING_NODE
+            command = self.control_exploreStraight("N")
+        elif self.trans == 3:
+            command = self.control_exploreStraight("S")
+        elif self.trans == 5:
+            command = self.control_exploreStraight("W")
+        elif self.trans == 7:
+            command = self.control_exploreStraight("E")
+        elif self.trans % 2 == 0 and self.trans <= 8:
+            command = self.control_gotoNode()
+        else:
+            self.movementState = Movement.STOPPED
+            self.state = State.START
+            command = EMPTY
+        return command
+
     def control(self):
         self.update_map()
         self.iter += 1
 
-        angle = 0
-
-        diff_angle = normalize_angle(angle - self.measured_compass_angle())
-
+        if self.iter <= 10:
+            return EMPTY
 
         if self.state == State.START:
-            command = self.control_goto()
+            print('Choosing a node to explore')
+            #Pick a random unvisited node
+            i = 0
+            self.node_objective = self.graph.nodes[i]
+            while not self.node_objective.isPrimary or self.graph.visited[self.node_objective.id] and len(self.graph.nodes) > i:
+                i += 1
+                self.node_objective = self.graph.nodes[i]
+            print('Chosen node', self.node_objective.id)
+            command = self.control_gotoNode()
             if self.movementState == Movement.STOPPED:
-                self.state = State.EXPLORATION
+                self.state = State.WAITING
             return command
 
         ###### EXPLORATION ######
-        if self.state == State.EXPLORATION:
-            if self.movementState == Movement.STOPPED:
-                self.trans += 1
-            if self.trans == 1:
-                command = self.control_exploreStraight("N")
-            elif self.trans == 3:
-                command = self.control_exploreStraight("S")
-            elif self.trans == 5:
-                command = self.control_exploreStraight("W")
-            elif self.trans == 7:
-                command = self.control_exploreStraight("E")
-            elif self.trans % 2 == 0 and self.trans <= 8:
-                self.target_position = START
-                command = self.control_goto()
-            else:
-                command = EMPTY
+        if self.state == State.WAITING: #WAITING AT NODE
+            print("Starting exploration")
+            self.trans = 0
+            self.graph.visited[self.node_objective.id] = True
+            command = self.control_explore_node()
             return command
+
+        if self.state == State.EXPLORING_NODE:
+            command = self.control_explore_node()
+            return command
+
+
 
     def draw_bottom_layer(self):
         # Draw the lines on the arcade playground
