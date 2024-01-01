@@ -22,15 +22,19 @@ class Node:
             self.x = x[0]
             self.y = x[1]
         self.neighbors: list = neighbors
+        self.isVisible = False
+        self.isGap = False
         self.isPrimary: bool = primary # Corners and gaps are primary
         self.weight: int = 1 #Number of times the node has been seen
-        self.directions = {"N": N, "E": E, "S": S, "W": W} # -1 wall, 0 unknown, 1 open and unexplored, 2 open and explored
+        self.directions = {"N": N, "E": E, "S": S, "W": W} # -1 wall, 0 unknown, 1 open and unexplored, 2 open and being explored, 3 open and explored
         self.timer = 50 #Number of frames before a node is considered old (and removed)
 
-    def __eq__(self, other, threshold=40):
+    def __eq__(self, other, threshold=20):
         """
         If the coordinates are close enough
         """
+        if self.isGap != other.isGap or self.isPrimary != other.isPrimary:
+            return False
         self.timer += 50
         return abs(self.x - other.x) < threshold and abs(self.y - other.y) < threshold
 
@@ -56,9 +60,10 @@ class Graph:
 
     def add_node(self, node: Node, position=None, sec:Node=None):
         # sec is Last Secondary
+        # position is the position of the drone
         # Check if the node is already in the graph using __eq__
         for n in self.nodes:
-            if n == node and n.isPrimary == node.isPrimary:
+            if n == node:
                 # Averages the position of the two nodes, weighted by the number of times they have been seen
                 n.x = int((n.x*n.weight + node.x)/(n.weight+1))
                 n.y = int((n.y*n.weight + node.y)/(n.weight+1))
@@ -75,21 +80,14 @@ class Graph:
         self.nodes.append(node)
         self.visited[node.id] = False
 
-
-    def draw(self, img):
-        """
-        Draw the graph on the image
-        """
-        for node in self.nodes:
-            if node.weight == 0:
-                continue
-            if node.isPrimary:
-                cv2.circle(img, (node.x, node.y), 5, (0, 0, 255), -1)
+    def delete_node(self, node: Node):
+        for i in range(len(self.nodes)):
+            if self.nodes[i] == node:
+                del self.nodes[i]
             else:
-                cv2.circle(img, (node.x, node.y), 3, (0, 255, 0), -1)
-            for neighbor in node.neighbors:
-                cv2.line(img, (node.x, node.y), (neighbor.x, neighbor.y), (0, 255, 0), 2)
-
+                for j in range(len(self.nodes[i].neighbors)):
+                    if self.nodes[i].neighbors[j] == node:
+                        del self.nodes[i].neighbors[j]
 
     def draw_arcade(self):
         """
@@ -99,10 +97,21 @@ class Graph:
             if node.weight == 0:
                 continue
             if node.isPrimary:
-                arcade.draw_circle_filled(node.x, node.y, 10, (0, 0, 255))
+                if node.isVisible:
+                    arcade.draw_circle_filled(node.x, node.y, 10, (255, 255, 255))
+                    node.isVisible = False
+                elif node.weight >= 3: #TODO: check the >= 3 everywhere
+                    arcade.draw_circle_filled(node.x, node.y, 10, (0, 0, 255))
+                else:
+                    pass
             else:
                 arcade.draw_circle_filled(node.x, node.y, 5, (0, 255, 0))
             for neighbor in node.neighbors:
                 if neighbor is None:
                     continue
-                arcade.draw_line(node.x, node.y, neighbor.x, neighbor.y, (0, 255, 0), 2)
+                if neighbor.isPrimary and node.isPrimary and node.weight >= 3 and neighbor.weight >= 3:
+                    #Draw a pink line
+                    arcade.draw_line(node.x, node.y, neighbor.x, neighbor.y, (255, 0, 255), 2)
+                else:
+                    #arcade.draw_line(node.x, node.y, neighbor.x, neighbor.y, (0, 255, 0), 2)
+                    pass

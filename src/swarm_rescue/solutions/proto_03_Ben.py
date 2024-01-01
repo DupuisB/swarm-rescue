@@ -5,6 +5,7 @@ from typing import List, Type
 import arcade
 import math
 import random
+from itertools import chain
 
 from typing import Union
 from spg.utils.definitions import CollisionTypes
@@ -112,6 +113,8 @@ class MyTestDrone(DroneAbstract):
         self.lastNode:Node = None #Either primary or secondary
         self.lastSecondaryNode:Node = None
 
+        #Divers
+        self.inRotation = False #Used to know the tick right after a rotation
     def define_message_for_all(self):
         """
         Here, we don't need communication...
@@ -139,13 +142,18 @@ class MyTestDrone(DroneAbstract):
             x[1] += self.size_area[1] / 2
             return x
 
-    def absolute_to_world(self, x, y):
+    def absolute_to_world(self, x:Union[int, float, tuple, np.array], y = None):
         """
         Convertit les coordonnées absolues en coordonnées monde
         """
-        x -= self.size_area[0] / 2
-        y -= self.size_area[1] / 2
-        return x, y
+        if y:
+            x -= self.size_area[0] / 2
+            y -= self.size_area[1] / 2
+            return x, y
+        else:
+            x[0] -= self.size_area[0] / 2
+            x[1] -= self.size_area[1] / 2
+            return x
 
     def update_map(self, fusion=False):
 
@@ -371,7 +379,7 @@ class MyTestDrone(DroneAbstract):
             lines[:, 0, 3] = np.round(lines[:, 0, 3])
             return lines
 
-        def ten_pixels(pos, x1, y1, dist=20):
+        def ten_pixels(pos, x1, y1, dist=30):
             if pos[0] <= x1:
                 x1 -= dist
             else:
@@ -381,6 +389,84 @@ class MyTestDrone(DroneAbstract):
             else:
                 y1 += dist
             return x1, y1
+
+        def visible_nodes():
+            """
+            return the nodes that are visible from the current position
+            returns a list of dictionnaries with the node, the angle and the distance
+            """
+            visibleNodes = []
+            #Scan if some nodes can be connected
+            for i in range(len(self.graph.nodes)):
+                node = self.graph.nodes[i]
+                if node.isPrimary:
+                    x, y = self.absolute_to_world(node.x, node.y)
+                    #Find the lidar ray for each node
+                    angle = np.arctan2(y - self.measured_gps_position()[1], x - self.measured_gps_position()[0])
+                    #angles are relative to the drone, so we add the compass angle (0 is East)
+                    angle -= self.measured_compass_angle()
+                    #lidar is 181 rays, 0 and 180 are the same, 90 is the front, return modulo 180
+                    angle = int(np.round(np.rad2deg(angle)/2) + 90) % 180
+                    #Calculate the distance between the drone and the nodes
+                    dist = np.linalg.norm(np.array((x, y)) - np.array(self.measured_gps_position()))
+                    if self.lidar_values()[angle] < 280 and self.lidar_values()[angle] > dist and node.isPrimary:
+                        data = (node, angle, dist)
+                        visibleNodes.append(data)
+                        node.isVisible = True
+            return visibleNodes
+
+        def update_transitions():
+            """
+            Check if transitions are possible between visible nodes
+            """
+            visibleNodes = visible_nodes()
+            for i in range(len(visibleNodes)):
+                for j in range(i + 1, len(visibleNodes)):
+                    node1, angle1, dist1 = visibleNodes[i]
+                    node2, angle2, dist2 = visibleNodes[j]
+                    if node1.id == node2.id or node1.x == node2.x or node1 in node2.neighbors:
+                        continue
+                    #Calculate the equation of the line between the two nodes
+                    x1, y1 = self.absolute_to_world(node1.x, node1.y)
+                    x2, y2 = self.absolute_to_world(node2.x, node2.y)
+                    a = (y2 - y1) / (x2 - x1)
+                    b = y1 - a * x1 #Equation is y = ax + b
+                    mini, maxi = min(angle1, angle2), max(angle1, angle2)
+                    if abs(maxi-mini) <= 90:
+                        arg = range(mini, maxi)
+                    else:
+                        arg = chain(range(maxi, 180), range(0, mini))
+
+                    #Check if all the points between the two nodes are free
+                    #We check  the intersection of the line with all the rays between the two nodes
+                    for angle in arg:
+                        #Calculate the equation of the angle-th ray
+                        a2 = np.tan(np.deg2rad(angle))
+                        b2 = self.measured_gps_position()[1] - a2 * self.measured_gps_position()[0]
+                        #Calculate the intersection of the two lines
+                        x = (b2 - b) / (a - a2)
+                        #Calculate the distance between x and the drone
+                        dist = np.linalg.norm(np.array((x, a2 * x + b2)) - np.array(self.measured_gps_position()))
+                        #Threshold is less strict near the actual nodes
+                        if abs(angle - min(angle1, angle2)) < 5 and abs(angle - max(angle1, angle2)) < 5:
+                            if self.lidar_values()[angle] < dist + 10:
+                                #Exit the loop if the ray is blocked
+                                break
+                            if self.lidar_values()[angle] < 10: #Chiant a expliquer mais important
+                                if self.lidar_values()[angle + 90 % 180] < 10 - dist:
+                                    break
+
+                        else:
+                            if self.lidar_values()[angle] < dist + 30:
+                                break
+                            if self.lidar_values()[angle] < 20: #Chiant a expliquer mais important
+                                if self.lidar_values()[angle + 90 % 180] < 30 - dist:
+                                    break
+                    else:
+                        #If the loop is not broken, the transition is possible
+                        node1.neighbors.append(node2)
+                        node2.neighbors.append(node1)
+                        break
 
         def detect_corners(lines, pos):
             pos = self.world_to_absolute(pos[0], pos[1])
@@ -410,20 +496,121 @@ class MyTestDrone(DroneAbstract):
                             x, y = ten_pixels(pos, x, y)
                             new_node = Node(x, y, primary=True)
                             coords_monde = self.absolute_to_world(x, y)
-                            # TODO: update N E S W
-                            if self.measured_gps_position()[0] < x:
-                                new_node.directions["E"] = 1
-                            else:
-                                new_node.directions["W"] = 1
-                            if self.measured_gps_position()[1] < y:
-                                new_node.directions["N"] = 1
-                            else:
-                                new_node.directions["S"] = 1
                             self.corners.append((x, y))
                             self.graph.add_node(new_node, self.world_to_absolute(self.measured_gps_position()), self.lastSecondaryNode)
                             if self.lastSecondaryNode is not None:
                                 self.lastSecondaryNode.neighbors.append(new_node)
                                 new_node.neighbors.append(self.lastSecondaryNode)
+
+        def distance_to_segment(x, y, x1, y1, x2, y2):
+            """
+            Distance between a point and a segment
+            """
+            # https://stackoverflow.com/questions/849211/shortest-distance-between-a-point-and-a-line-segment
+            A = x - x1
+            B = y - y1
+            C = x2 - x1
+            D = y2 - y1
+
+            dot = A * C + B * D
+            len_sq = C * C + D * D
+            param = -1
+            if len_sq != 0:
+                param = dot / len_sq
+
+            if param < 0:
+                xx = x1
+                yy = y1
+            elif param > 1:
+                xx = x2
+                yy = y2
+            else:
+                xx = x1 + param * C
+                yy = y1 + param * D
+
+            dx = x - xx
+            dy = y - yy
+            return np.sqrt(dx * dx + dy * dy)
+
+        def closest_lines(lines, pos, mini):
+            """
+            Returns FALSE is at least mini/2 pixels away from the closest line
+            """
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                dist = distance_to_segment(pos[0], pos[1], x1, y1, x2, y2)
+                if dist < mini/2:
+                    return False
+            return True
+        def are_aligned(lines, x1, y1, x2, y2, x3, y3, x4, y4, threshold = 0.01, dist_decalage = 30, minimum_gap = 20):
+            v1 = np.array([(x2 - x1), (y2 - y1)]) / np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            v2 = np.array([(x4 - x3), (y4 - y3)]) / np.sqrt((x4 - x3) ** 2 + (y4 - y3) ** 2)
+
+            if abs(np.dot(v1, v2) - 1) > threshold: # Checks if the lines are parallel
+                return None
+
+            #Project x3, y3 on the line (x1, y1) (x2, y2)
+            dist = abs((x2 - x1)*(y1 - y3) - (x1 - x3)*(y2 - y1)) / np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            if dist > 5:
+                return None
+
+            #Find the closest points in the segments, try every comparison
+            p1, p2, mini_dist = None, None, float('inf')
+            if np.linalg.norm((x1 - x3, y1 - y3)) < mini_dist:
+                p1, p2, mini_dist = (x1, y1), (x3, y3), np.linalg.norm((x1 - x3, y1 - y3))
+            if np.linalg.norm((x1 - x4, y1 - y4)) < mini_dist:
+                p1, p2, mini_dist = (x1, y1), (x4, y4), np.linalg.norm((x1 - x4, y1 - y4))
+            if np.linalg.norm((x2 - x3, y2 - y3)) < mini_dist:
+                p1, p2, mini_dist = (x2, y2), (x3, y3), np.linalg.norm((x2 - x3, y2 - y3))
+            if np.linalg.norm((x2 - x4, y2 - y4)) < mini_dist:
+                p1, p2, mini_dist = (x2, y2), (x4, y4), np.linalg.norm((x2 - x4, y2 - y4))
+
+            if mini_dist < minimum_gap:
+                return None
+
+            middle_point = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+
+            if closest_lines(lines, middle_point, mini_dist):
+                perpendicular_vector = np.array([-v1[1], v1[0]])  # Perpendicular vector
+                # We want the perpendicular vector to be oriented towards the drone half plane
+                x, y = self.measured_gps_position()
+                #Convert middle point to world coordinates
+                middle_point2 = self.absolute_to_world(middle_point[0], middle_point[1])
+                if np.dot(perpendicular_vector, np.array([x - middle_point2[0], y - middle_point2[1]])) < 0:
+                    perpendicular_vector *= -1
+                middle_point += dist_decalage * perpendicular_vector
+                return middle_point
+            return None
+
+        def detect_gaps(lines, pos):
+            pos = self.world_to_absolute(pos[0], pos[1])
+            if lines is None:
+                return
+            for i in range(len(lines)):
+                for j in range(i + 1, len(lines)):
+                    found_corner = False
+                    x1, y1, x2, y2 = lines[i][0]
+                    x3, y3, x4, y4 = lines[j][0]
+                    # Check if the lines are basically aligned
+                    data = are_aligned(lines, x1, y1, x2, y2, x3, y3, x4, y4)
+                    if data is not None:
+                        new_node = Node(data[0], data[1], primary=True)
+                        new_node.isGap = True
+                        coords_monde = self.absolute_to_world(data[0], data[1])
+                        self.graph.add_node(new_node, self.world_to_absolute(self.measured_gps_position()),
+                                            self.lastSecondaryNode)
+                        if self.lastSecondaryNode is not None:
+                            self.lastSecondaryNode.neighbors.append(new_node)
+                            new_node.neighbors.append(self.lastSecondaryNode)
+
+        def update_gaps(lines):
+            for node in self.graph.nodes:
+                if node.isGap:
+                    if not closest_lines(lines, (node.x, node.y), 70):
+                        if node.weight <= 3:
+                            self.graph.nodes.remove(node)
+                        else:
+                            node.weight -= 3
 
         absolute_points = lidar_to_absolute()
         points = self.world_to_absolute2(absolute_points)
@@ -433,6 +620,7 @@ class MyTestDrone(DroneAbstract):
 
         if fusion:  # A voir
             lines_h, lines_v = align_lines_on_axis(base_lines)
+            lines_h, lines_v = fuse_close_lines(lines_h, 1), fuse_close_lines(lines_v, 0)
             if lines_h is not None and lines_v is not None:
                 fused_lines = np.concatenate((lines_h, lines_v))
             else:
@@ -443,6 +631,7 @@ class MyTestDrone(DroneAbstract):
         rounded_lines = int_coordonates(fused_lines)
         self.lines = rounded_lines
         detect_corners(rounded_lines, self.measured_gps_position())
+        detect_gaps(rounded_lines, self.measured_gps_position())
 
         #Every 15 frames, we add the current position as a secondary node
         if self.iter % 15 == 0:
@@ -453,6 +642,8 @@ class MyTestDrone(DroneAbstract):
                 new_node.neighbors.append(self.lastSecondaryNode)
             self.lastSecondaryNode = new_node
 
+        update_transitions()
+        update_gaps(rounded_lines)
         self.graph.update()
         return
 
@@ -514,6 +705,9 @@ class MyTestDrone(DroneAbstract):
         Rotate on itself to reach the given direction (using PD)
         """
 
+        if not self.inRotation:
+            self.inRotation = True
+
         dir_to_angle = {"N": np.pi/2, "E": 0, "S": 3*np.pi/2, "W": np.pi}
 
         if direction in dir_to_angle:
@@ -567,13 +761,23 @@ class MyTestDrone(DroneAbstract):
             return self.control_orientation(direction)
 
         if self.lidar_values()[90] < 100:
+            if self.inRotation:
+                #Update the direction of the node
+                self.node_objective.directions[direction] = -1
+                self.inRotation = False
             print('Wall in front !')
             #Add the node to the graph
             new_node = Node(self.world_to_absolute(self.measured_gps_position()), primary=False)
             self.graph.add_node(new_node)
-            new_node.neighbors.append(self.node)
+            new_node.neighbors.append(self.node_objective)
+            self.node_objective.neighbors.append(new_node)
             self.movementState = Movement.STOPPED
             return EMPTY
+
+        if self.inRotation:
+            #Update the direction of the node
+            self.node_objective.directions[direction] = 2
+            self.inRotation = False
 
         return self.control_goto()
 
@@ -618,22 +822,22 @@ class MyTestDrone(DroneAbstract):
         self.update_map()
         self.iter += 1
 
-        if self.iter <= 10:
-            return EMPTY
-
         if self.state == State.START:
-            print('Choosing a node to explore')
+            #print('Choosing a node to explore')
             #Pick a random unvisited node
+
             i = 0
-            self.node_objective = self.graph.nodes[i]
-            while not self.node_objective.isPrimary or self.graph.visited[self.node_objective.id] and len(self.graph.nodes) > i:
-                i += 1
+            while self.node_objective is None or not self.node_objective.isPrimary or self.graph.visited[self.node_objective.id]:
+                if i == len(self.graph.nodes):
+                    break
                 self.node_objective = self.graph.nodes[i]
-            print('Chosen node', self.node_objective.id)
-            command = self.control_gotoNode()
-            if self.movementState == Movement.STOPPED:
-                self.state = State.WAITING
-            return command
+                i += 1
+            else:
+                command = self.control_gotoNode()
+                if self.movementState == Movement.STOPPED:
+                    self.state = State.WAITING
+                return command
+            return EMPTY
 
         ###### EXPLORATION ######
         if self.state == State.WAITING: #WAITING AT NODE
@@ -711,7 +915,7 @@ def main():
 
     gui = GuiSR(playground=playground,
                 the_map=my_map,
-                use_keyboard=False,
+                use_keyboard=True,
                 draw_gps=True
                 )
     gui.run()
